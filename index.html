@@ -109,6 +109,12 @@
             cursor: pointer;
             box-shadow: 0 4px 15px rgba(108, 92, 231, 0.3);
         }
+
+        @keyframes blink {
+            50% {
+                opacity: 0.5;
+            }
+        }
     </style>
 </head>
 
@@ -160,6 +166,8 @@
             <div id="img-container" style="text-align: center; margin: 10px 0; min-height: 0px;"></div>
             <h2 id="question-text">載入中...</h2>
             <div id="options-container"></div>
+            <div id="waiting-msg" class="hidden"
+                style="margin-top:10px; color:#e17055; font-weight:bold; animation: blink 1s infinite;">等待對手回答...</div>
         </div>
 
         <div id="result-screen" class="hidden">
@@ -194,8 +202,12 @@
         let isHost = false;
         let isMultiplayer = false;
 
+        // Sync State
+        let myReady = false;
+        let oppReady = false;
+
         function initHost() {
-            const id = Math.floor(Math.random() * 900000000 + 100000000).toString(); // 9-digit numeric ID
+            const id = Math.floor(Math.random() * 9000 + 1000).toString(); // 4-digit ID
             peer = new Peer(id);
             peer.on('open', (id) => {
                 document.getElementById('my-peer-id').innerText = id;
@@ -255,6 +267,12 @@
             } else if (data.type === 'GAME_OVER') {
                 // Opponent finished
                 updateRankingUI(score, data.score);
+            } else if (data.type === 'QUESTION_ANSWERED') {
+                if (data.round === currentIdx) {
+                    oppReady = true;
+                    document.getElementById('waiting-msg').innerText = "對手已回答！";
+                    checkSyncNext();
+                }
             }
         }
 
@@ -285,7 +303,16 @@
         }
 
         function loadQuestion() {
-            if (currentIdx >= questions.length) return endGame();
+            if (currentIdx >= questions.length) {
+                endGame();
+                return;
+            }
+
+            // Reset Sync Flags
+            myReady = false;
+            oppReady = false;
+            document.getElementById('waiting-msg').classList.add('hidden');
+            document.getElementById('options-container').classList.remove('disabled-area'); // Assuming you might add this class for disabling
 
             const q = questions[currentIdx];
             document.getElementById('question-text').innerText = q.q;
@@ -322,23 +349,22 @@
 
         function startTimer() {
             clearInterval(timerId);
-            timeLeft = 100;
-            updateTimerBar();
+            timeLeft = TIME_LIMIT;
+            document.getElementById('timer-bar').style.width = '100%';
             timerId = setInterval(() => {
                 timeLeft -= 1;
-                updateTimerBar();
+                document.getElementById('timer-bar').style.width = timeLeft + '%';
                 if (timeLeft <= 0) {
                     checkAnswer(-1, null); // 時間到
                 }
             }, 100);
         }
 
-        function updateTimerBar() {
-            document.getElementById('timer-bar').style.width = timeLeft + '%';
-        }
-
         function updateScoreDisplay() {
             document.getElementById('live-score').innerText = `目前分數：${score}`;
+            if (conn && conn.open) {
+                try { conn.send({ type: 'SCORE_UPDATE', score: score }); } catch (e) { }
+            }
         }
 
         function checkAnswer(selectedOriginalIndex, selectedBtn) {
@@ -350,7 +376,7 @@
 
             if (selectedOriginalIndex === q.correct) {
                 if (selectedBtn) selectedBtn.classList.add('correct');
-                score += 100 + timeLeft;
+                score += Math.ceil(timeLeft / 10 * 10); // Score based on remaining time
                 updateScoreDisplay();
             } else {
                 if (selectedBtn) selectedBtn.classList.add('wrong');
@@ -359,10 +385,29 @@
                 if (correctBtn) correctBtn.classList.add('correct');
             }
 
-            setTimeout(() => {
-                currentIdx++;
-                loadQuestion();
-            }, 1200);
+            // Sync Logic
+            if (isMultiplayer) {
+                myReady = true;
+                conn.send({ type: 'QUESTION_ANSWERED', round: currentIdx });
+
+                document.getElementById('waiting-msg').innerText = "等待對手回答...";
+                document.getElementById('waiting-msg').classList.remove('hidden');
+
+                checkSyncNext();
+            } else {
+                setTimeout(nextQuestion, 1200);
+            }
+        }
+
+        function checkSyncNext() {
+            if (myReady && oppReady) {
+                setTimeout(nextQuestion, 500); // Short delay to see status
+            }
+        }
+
+        function nextQuestion() {
+            currentIdx++;
+            loadQuestion();
         }
 
         function endGame() {
