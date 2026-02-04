@@ -307,7 +307,8 @@
                 if (data.round === currentIdx) {
                     oppReady = true;
                     document.getElementById('waiting-msg').innerText = "對手已回答！";
-                    checkSyncNext();
+                    // 檢查是否所有人都答完
+                    checkAllAnswered();
                 }
             } else if (data.type === 'NEXT_QUESTION') {
                 // 房主按了下一題，客人同步跳轉
@@ -440,12 +441,25 @@
             }
 
             // 顯示等待訊息
-            document.getElementById('waiting-msg').innerText = "已作答，等待時間結束...";
+            document.getElementById('waiting-msg').innerText = "已作答，等待對手...";
             document.getElementById('waiting-msg').classList.remove('hidden');
 
             // 多人模式同步
             if (isMultiplayer && conn && conn.open) {
+                myReady = true;
                 conn.send({ type: 'QUESTION_ANSWERED', round: currentIdx });
+                // 檢查是否所有人都答完
+                checkAllAnswered();
+            } else {
+                // 單人模式：直接揭曉答案
+                revealAnswer();
+            }
+        }
+
+        function checkAllAnswered() {
+            // 如果所有人都答完，立即揭曉答案
+            if (myReady && oppReady) {
+                revealAnswer();
             }
         }
 
