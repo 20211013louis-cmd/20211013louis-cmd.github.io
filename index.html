@@ -266,16 +266,29 @@
         }
 
         function setupConnection() {
+            // 設定 data 監聽器（無論連線是否已 open）
+            conn.on('data', (data) => {
+                handleData(data);
+            });
+
             conn.on('open', () => {
+                console.log("Connection opened, isHost:", isHost);
                 document.getElementById('connection-status').innerText = isHost ? "對手已加入！請按開始" : "已連線！等待房主開始";
                 if (!isHost) {
                     document.getElementById('start-game-btn').classList.add('hidden'); // Guests wait for host
                     document.getElementById('host-controls').classList.add('hidden');
                 }
             });
-            conn.on('data', (data) => {
-                handleData(data);
-            });
+
+            // 如果連線已經是 open 狀態（房主端常見情況），直接更新 UI
+            if (conn.open) {
+                console.log("Connection already open, isHost:", isHost);
+                document.getElementById('connection-status').innerText = isHost ? "對手已加入！請按開始" : "已連線！等待房主開始";
+                if (!isHost) {
+                    document.getElementById('start-game-btn').classList.add('hidden');
+                    document.getElementById('host-controls').classList.add('hidden');
+                }
+            }
         }
 
         function handleData(data) {
