@@ -296,6 +296,9 @@
                     document.getElementById('waiting-msg').innerText = "對手已回答！";
                     checkSyncNext();
                 }
+            } else if (data.type === 'NEXT_QUESTION') {
+                // 房主按了下一題，客人同步跳轉
+                goToNextQuestion();
             }
         }
 
@@ -462,8 +465,15 @@
             // 隱藏等待訊息
             document.getElementById('waiting-msg').classList.add('hidden');
 
-            // 顯示「下一題」按鈕
-            document.getElementById('next-btn').classList.remove('hidden');
+            // 顯示「下一題」按鈕（多人模式只有房主可以按）
+            if (isMultiplayer && !isHost) {
+                // 非房主等待房主按下一題
+                document.getElementById('waiting-msg').innerText = "等待房主進入下一題...";
+                document.getElementById('waiting-msg').classList.remove('hidden');
+                document.getElementById('next-btn').classList.add('hidden');
+            } else {
+                document.getElementById('next-btn').classList.remove('hidden');
+            }
         }
 
         // 保留 checkAnswer 用於向後相容（時間到時自動呼叫）
@@ -482,8 +492,17 @@
         }
 
         function nextQuestion() {
+            // 多人模式下，房主通知客人跳下一題
+            if (isMultiplayer && isHost && conn && conn.open) {
+                conn.send({ type: 'NEXT_QUESTION' });
+            }
+            goToNextQuestion();
+        }
+
+        function goToNextQuestion() {
             // 隱藏下一題按鈕
             document.getElementById('next-btn').classList.add('hidden');
+            document.getElementById('waiting-msg').classList.add('hidden');
             currentIdx++;
             loadQuestion();
         }
