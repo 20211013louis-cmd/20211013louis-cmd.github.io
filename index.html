@@ -150,6 +150,13 @@
                 style="margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 10px; border: 1px solid #e9ecef;">
                 <div id="connection-status" style="margin-bottom: 15px; font-weight: bold; color: #636e72;">單機模式</div>
 
+                <div style="margin-bottom: 15px;">
+                    <label
+                        style="display:block; text-align:left; font-weight:bold; color:#2d3436; margin-bottom:5px;">您的暱稱</label>
+                    <input type="text" id="player-name-input" placeholder="輸入您的暱稱" value="玩家"
+                        style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px; box-sizing: border-box;">
+                </div>
+
                 <div id="host-controls">
                     <button class="option-btn" onclick="initHost()"
                         style="background:var(--secondary); color:#fff; border:none;">🏠 建立房間 (產生邀請碼)</button>
@@ -221,9 +228,14 @@
 
         // Multiplayer logic
         let peer = null;
-        let conn = null;
+        let conn = null; // Client: Connection to Host
+        let connections = []; // Host: Array of connections to Clients
         let isHost = false;
         let isMultiplayer = false;
+
+        // Host: Player States
+        // { peerId: { name: "Player N", score: 0, ready: false, answers: {} } }
+        let players = {};
 
         // Sync State
         let myReady = false;
@@ -235,15 +247,30 @@
             peer.on('open', (id) => {
                 document.getElementById('my-peer-id').innerText = id;
                 document.getElementById('invite-code-display').classList.remove('hidden');
-                document.getElementById('connection-status').innerText = "等待對手加入...";
+                updatePlayerCountUI(); // Update UI
+                document.getElementById('connection-status').innerText = "等待玩家加入...";
                 document.getElementById('join-controls').classList.add('hidden');
                 isHost = true;
                 isMultiplayer = true;
+
+                // Host 也要算作一個玩家
+                const myName = document.getElementById('player-name-input').value.trim() || "房主";
+                players['host'] = { name: myName, score: 0, ready: false, isHost: true };
             });
             peer.on('connection', (c) => {
-                conn = c;
-                setupConnection();
-                document.getElementById('connection-status').innerText = "玩家已連線！準備開始";
+                connections.push(c);
+                console.log("New connection:", c.peer);
+                setupHostConnection(c);
+
+                // Initialize new player
+                const guestName = c.metadata && c.metadata.name ? c.metadata.name : `玩家 ${connections.length}`;
+                players[c.peer] = { name: guestName, score: 0, ready: false };
+                updatePlayerCountUI();
+
+                // Send current state or welcome
+                c.on('open', () => {
+                    c.send({ type: 'WELCOME', questions: questions, yourId: c.peer });
+                });
             });
             peer.on('error', (err) => {
                 if (err.type === 'unavailable-id') initHost(); // Retry if ID collision
@@ -251,75 +278,114 @@
             });
         }
 
+        // Host handles connection from a client
+        function setupHostConnection(c) {
+            c.on('data', (data) => {
+                handleData(data, c.peer); // Pass peerId to handleData
+            });
+            c.on('close', () => {
+                console.log("Connection closed:", c.peer);
+                connections = connections.filter(conn => conn !== c);
+                delete players[c.peer];
+                updatePlayerCountUI();
+                // If a player leaves, check if we can proceed
+                checkAllAnswered();
+            });
+        }
+
+        function updatePlayerCountUI() {
+            const count = Object.keys(players).length; // Host + Clients
+            document.getElementById('connection-status').innerText = `目前連線人數: ${count} 人`;
+        }
+
+        // Client connects to Host
         function joinGame() {
             const targetId = document.getElementById('target-peer-id').value.trim();
             if (!targetId) return alert("請輸入邀請碼");
 
+            const myName = document.getElementById('player-name-input').value.trim() || "玩家";
+
             peer = new Peer();
             peer.on('open', () => {
-                conn = peer.connect(targetId);
+                // Send metadata with name
+                conn = peer.connect(targetId, { metadata: { name: myName } });
                 isMultiplayer = true;
-                setupConnection();
+                setupClientConnection();
                 document.getElementById('connection-status').innerText = "連線中...";
             });
             peer.on('error', (err) => alert("連線失敗，請檢查邀請碼"));
         }
 
-        function setupConnection() {
-            // 設定 data 監聽器（無論連線是否已 open）
+        function setupClientConnection() {
+            // 設定 data 監聽器
             conn.on('data', (data) => {
                 handleData(data);
             });
 
             conn.on('open', () => {
-                console.log("Connection opened, isHost:", isHost);
-                document.getElementById('connection-status').innerText = isHost ? "對手已加入！請按開始" : "已連線！等待房主開始";
-                if (!isHost) {
-                    document.getElementById('start-game-btn').classList.add('hidden'); // Guests wait for host
-                    document.getElementById('host-controls').classList.add('hidden');
-                }
+                console.log("Connected to Host");
+                document.getElementById('connection-status').innerText = "已連線！等待房主開始";
+                document.getElementById('start-game-btn').classList.add('hidden');
+                document.getElementById('host-controls').classList.add('hidden');
             });
-
-            // 如果連線已經是 open 狀態（房主端常見情況），直接更新 UI
-            if (conn.open) {
-                console.log("Connection already open, isHost:", isHost);
-                document.getElementById('connection-status').innerText = isHost ? "對手已加入！請按開始" : "已連線！等待房主開始";
-                if (!isHost) {
-                    document.getElementById('start-game-btn').classList.add('hidden');
-                    document.getElementById('host-controls').classList.add('hidden');
-                }
-            }
         }
 
-        function handleData(data) {
-            console.log("Received:", data);
-            if (data.type === 'START_GAME') {
-                // Sync questions from host if provided, otherwise use local (assume sync)
-                // Better: Host sends questions to ensure consistency
-                if (data.questions) {
-                    questions = data.questions;
+        function broadcast(data) {
+            connections.forEach(c => {
+                if (c.open) c.send(data);
+            });
+        }
+
+        function handleData(data, peerId = null) {
+            console.log("Received data:", data, "from:", peerId);
+
+            if (isHost) {
+                // Host Logic
+                if (data.type === 'QUESTION_ANSWERED') {
+                    if (players[peerId]) {
+                        players[peerId].ready = true;
+                        // Broadcast wait status? Or just wait.
+                        checkAllAnswered();
+                    }
+                } else if (data.type === 'SCORE_UPDATE') {
+                    if (players[peerId]) {
+                        players[peerId].score = data.score;
+                    }
+                } else if (data.type === 'GAME_OVER') {
+                    if (players[peerId]) {
+                        players[peerId].score = data.score; // Final score
+                        // Check if everyone finished? 
+                        // For now, simplified: End Game logic handles ranking
+                    }
                 }
-                startGame(true); // true = remote start
-            } else if (data.type === 'GAME_OVER') {
-                // Opponent finished
-                updateRankingUI(score, data.score);
-            } else if (data.type === 'QUESTION_ANSWERED') {
-                if (data.round === currentIdx) {
-                    oppReady = true;
-                    document.getElementById('waiting-msg').innerText = "對手已回答！";
-                    // 檢查是否所有人都答完
-                    checkAllAnswered();
+            } else {
+                // Client Logic
+                if (data.type === 'WELCOME') {
+                    if (data.questions) questions = data.questions;
+                    // Optional: store my ID if needed: data.yourId
+                } else if (data.type === 'START_GAME') {
+                    if (data.questions) questions = data.questions;
+                    startGame(true);
+                } else if (data.type === 'NEXT_QUESTION') {
+                    goToNextQuestion();
+                } else if (data.type === 'REVEAL_ANSWER') {
+                    revealAnswer(); // Host says time's up or everyone answered
+                } else if (data.type === 'GAME_OVER') {
+                    if (data.ranking) {
+                        updateRankingList(data.ranking);
+                    }
+                    endGame(true); // true = remote
+                } else if (data.type === 'UPDATE_RANKING') {
+                    // Update ranking UI (Optional, if we do live ranking)
+                    updateRankingList(data.ranking);
                 }
-            } else if (data.type === 'NEXT_QUESTION') {
-                // 房主按了下一題，客人同步跳轉
-                goToNextQuestion();
             }
         }
 
         function tryStartGame() {
-            if (isMultiplayer && isHost && conn) {
+            if (isMultiplayer && isHost) {
                 // Broadcast start
-                conn.send({ type: 'START_GAME', questions: questions });
+                broadcast({ type: 'START_GAME', questions: questions });
                 startGame();
             } else if (isMultiplayer && !isHost) {
                 // Guest waiting
@@ -348,13 +414,16 @@
                 return;
             }
 
-            // Reset Sync Flags
-            myReady = false;
-            oppReady = false;
+            // Reset Round State
+            if (isHost) {
+                // Reset all players ready state
+                Object.keys(players).forEach(pid => players[pid].ready = false);
+            }
+
             // 重置玩家選擇
             playerSelection = { index: -1, btn: null, timeRemaining: 0 };
             document.getElementById('waiting-msg').classList.add('hidden');
-            document.getElementById('options-container').classList.remove('disabled-area'); // Assuming you might add this class for disabling
+            document.getElementById('options-container').classList.remove('disabled-area');
 
             const q = questions[currentIdx];
             document.getElementById('question-text').innerText = q.q;
@@ -411,8 +480,12 @@
 
         function updateScoreDisplay() {
             document.getElementById('live-score').innerText = `目前分數：${score}`;
-            if (conn && conn.open) {
-                try { conn.send({ type: 'SCORE_UPDATE', score: score }); } catch (e) { }
+            if (isMultiplayer) {
+                if (isHost) {
+                    players['host'].score = score;
+                } else {
+                    if (conn && conn.open) conn.send({ type: 'SCORE_UPDATE', score: score });
+                }
             }
         }
 
@@ -441,15 +514,17 @@
             }
 
             // 顯示等待訊息
-            document.getElementById('waiting-msg').innerText = "已作答，等待對手...";
+            document.getElementById('waiting-msg').innerText = "已作答，等待其他玩家...";
             document.getElementById('waiting-msg').classList.remove('hidden');
 
             // 多人模式同步
-            if (isMultiplayer && conn && conn.open) {
-                myReady = true;
-                conn.send({ type: 'QUESTION_ANSWERED', round: currentIdx });
-                // 檢查是否所有人都答完
-                checkAllAnswered();
+            if (isMultiplayer) {
+                if (isHost) {
+                    players['host'].ready = true;
+                    checkAllAnswered();
+                } else {
+                    conn.send({ type: 'QUESTION_ANSWERED', round: currentIdx });
+                }
             } else {
                 // 單人模式：直接揭曉答案
                 revealAnswer();
@@ -457,8 +532,14 @@
         }
 
         function checkAllAnswered() {
-            // 如果所有人都答完，立即揭曉答案
-            if (myReady && oppReady) {
+            if (!isHost) return;
+
+            // Host checks if EVERYONE (including self) is ready
+            const allReady = Object.values(players).every(p => p.ready);
+
+            if (allReady) {
+                // Broadcast Reveal
+                broadcast({ type: 'REVEAL_ANSWER' });
                 revealAnswer();
             }
         }
@@ -520,8 +601,8 @@
 
         function nextQuestion() {
             // 多人模式下，房主通知客人跳下一題
-            if (isMultiplayer && isHost && conn && conn.open) {
-                conn.send({ type: 'NEXT_QUESTION' });
+            if (isMultiplayer && isHost) {
+                broadcast({ type: 'NEXT_QUESTION' });
             }
             goToNextQuestion();
         }
@@ -534,38 +615,57 @@
             loadQuestion();
         }
 
-        function endGame() {
+        function endGame(isRemote = false) {
             document.getElementById('quiz-screen').classList.add('hidden');
             document.getElementById('result-screen').classList.remove('hidden');
             document.getElementById('score-display').innerText = `最終得分：${score}`;
 
-            // Multiplayer Ranking Logic
-            if (isMultiplayer && conn && conn.open) {
-                conn.send({ type: 'GAME_OVER', score: score });
+            if (isMultiplayer) {
                 document.getElementById('ranking-container').classList.remove('hidden');
-                document.getElementById('rank-list').innerHTML = `
-                    <div style="padding:5px; border-bottom:1px solid #ddd; font-weight:bold; color:var(--primary);">我方: ${score} 分 (等待對手成績...)</div>
-                `;
+
+                if (isHost && !isRemote) {
+                    // Host calculates ranking
+                    // Convert players object to array
+                    let ranking = Object.values(players).map(p => ({
+                        name: p.name,
+                        score: p.score,
+                        isHost: p.isHost
+                    }));
+
+                    // Sort descending
+                    ranking.sort((a, b) => b.score - a.score);
+
+                    // Broadcast
+                    broadcast({ type: 'GAME_OVER', ranking: ranking });
+
+                    // Show locally
+                    updateRankingList(ranking);
+                }
+                // Client waits for GAME_OVER message with ranking (handled in handleData)
             } else {
                 document.getElementById('ranking-container').classList.add('hidden');
             }
         }
 
         // Helper to update ranking UI
-        function updateRankingUI(myScore, oppScore) {
+        function updateRankingList(ranking) {
             const list = document.getElementById('rank-list');
-            let myClass = myScore > oppScore ? "🥇 冠軍" : (myScore == oppScore ? "🤝 平手" : "🥈 亞軍");
-            let oppClass = oppScore > myScore ? "🥇 冠軍" : (myScore == oppScore ? "🤝 平手" : "🥈 亞軍");
-
-            // Sort
             let html = '';
-            if (myScore >= oppScore) {
-                html += `<div style="padding:10px; border-bottom:1px solid #ddd; font-weight:bold; color:#00b894;">${myClass} - 我方: ${myScore} 分</div>`;
-                html += `<div style="padding:10px; font-weight:bold; color:#d63031;">${oppClass} - 對手: ${oppScore} 分</div>`;
-            } else {
-                html += `<div style="padding:10px; border-bottom:1px solid #ddd; font-weight:bold; color:#d63031;">${oppClass} - 對手: ${oppScore} 分</div>`;
-                html += `<div style="padding:10px; font-weight:bold; color:#00b894;">${myClass} - 我方: ${myScore} 分</div>`;
-            }
+
+            ranking.forEach((p, index) => {
+                let rankIcon = index === 0 ? "🥇" : (index === 1 ? "🥈" : (index === 2 ? "🥉" : `#${index + 1}`));
+                let color = index === 0 ? "#d63031" : (index === 1 ? "#e17055" : "#636e72");
+                // Highlight self if possible? For now, just show names
+                // If I am host, I know "房主 (我)"
+
+                html += `
+                    <div style="display:flex; justify-content:space-between; padding:10px; border-bottom:1px solid #eee; color:${color}; font-weight:bold;">
+                        <span>${rankIcon} ${p.name}</span>
+                        <span>${p.score} 分</span>
+                    </div>
+                `;
+            });
+
             list.innerHTML = html;
         }
     </script>
